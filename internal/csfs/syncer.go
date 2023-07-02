@@ -7,23 +7,49 @@ import (
 	"time"
 )
 
+type syncType int
+
+func (s syncType) String() string {
+	switch s {
+	case syncTypeCodespace:
+		return "codespace"
+	case syncTypeLocal:
+		return "local"
+	default:
+		return "unknown"
+	}
+}
+
+const (
+	syncTypeCodespace syncType = iota
+	syncTypeLocal
+)
+
 type syncer struct {
 	port         int
 	localDir     string
 	codespaceDir string
 	excludes     []string
+	deleteFiles  bool
 
 	syncToCodespace chan struct{}
+	transferNotify  chan syncType
 }
 
-func newSyncer(port int, localDir, codespaceDir string, excludes []string) *syncer {
+func newSyncer(port int, localDir, codespaceDir string, excludes []string, deleteFiles bool) *syncer {
 	return &syncer{
 		port:            port,
 		localDir:        localDir,
 		codespaceDir:    codespaceDir,
 		excludes:        excludes,
+		deleteFiles:     deleteFiles,
 		syncToCodespace: make(chan struct{}),
+		transferNotify:  make(chan syncType),
 	}
+}
+
+func (s *syncer) TransferNotify() <-chan syncType {
+	return s.transferNotify
 }
 
 func (s *syncer) SyncToLocal(ctx context.Context) error {
@@ -57,17 +83,33 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 	args := []string{
 		"--archive",
 		"--compress",
-		"--delete",
 		"--update",
+		"--perms",
 		"-e",
 		fmt.Sprintf("ssh -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no", s.port),
+	}
+	if s.deleteFiles {
+		args = append(args, "--delete")
 	}
 	for _, exclude := range excludePaths {
 		args = append(args, "--exclude", exclude)
 	}
 	args = append(args, srcDirWithSuffix(src), dest)
 	cmd := exec.CommandContext(ctx, "rsync", args...)
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	t := syncTypeLocal
+	if src == s.localDir {
+		t = syncTypeCodespace
+	}
+	select {
+	case s.transferNotify <- t:
+	default:
+	}
+
+	return nil
 }
 
 func srcDirWithSuffix(src string) string {

@@ -11,6 +11,7 @@ func New(a *csfs.App) *cobra.Command {
 	var codespace string
 	var workspace string
 	var exclude []string
+	var deleteFiles bool
 
 	cmd := &cobra.Command{
 		Use:           "csfs",
@@ -23,13 +24,14 @@ Additionally, csfs requires the GitHub command-line tool (gh) and rsync to be in
 		Version: version,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.Run(cmd.Context(), codespace, workspace, exclude)
+			return a.Run(cmd.Context(), codespace, workspace, exclude, deleteFiles)
 		},
 	}
 
 	cmd.Flags().StringVarP(&codespace, "codespace", "c", "", "codespace to use")
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "workspace to use")
 	cmd.Flags().StringSliceVarP(&exclude, "exclude", "e", []string{}, "exclude files matching pattern")
+	cmd.Flags().BoolVarP(&deleteFiles, "delete", "d", false, "delete files that don't exist in the codespace")
 
 	return cmd
 }

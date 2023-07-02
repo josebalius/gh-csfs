@@ -9,15 +9,23 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/briandowns/spinner"
 )
 
-type App struct{}
-
-func NewApp() *App {
-	return &App{}
+type App struct {
+	spinner *spinner.Spinner
 }
 
-func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []string) (err error) {
+func NewApp() *App {
+	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond)
+	return &App{
+		spinner: s,
+	}
+}
+
+func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []string, deleteFiles bool) (err error) {
+	defer a.opdone()
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -48,18 +56,20 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	errch := make(chan error, 3) // sshServer, watcher, syncer
 	defer close(errch)
 
-	fmt.Println("Connecting to Codespace...")
+	a.op("Connecting to codespace")
 	go func() {
 		if err := sshServer.Listen(ctx); err != nil {
 			errch <- fmt.Errorf("ssh server failed: %w", err)
 		}
 	}()
+	a.opdone()
 
 	// Wait for the ssh server to be ready, or timeout.
-	fmt.Println("Waiting for server to be ready...")
+	a.op("Waiting for server to be ready")
 	sshServerCtx, sshServerCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer sshServerCancel()
 	username, err := a.waitForSSHServer(sshServerCtx, errch, sshServer)
+	a.opdone()
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			return errors.New("SSH Server timed out")
@@ -67,7 +77,7 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 		return fmt.Errorf("ssh server ready failed: %w", err)
 	}
 
-	fmt.Println("Server is ready.")
+	a.op("Setting up sync opertions")
 	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", username, workspace)
 	wd, err := os.Getwd()
 	if err != nil {
@@ -78,47 +88,72 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	if len(exclude) > 0 {
 		excludes = append(excludes, exclude...)
 	}
-	syncer := newSyncer(sshServerPort, localDir, codespaceDir, excludes)
+	syncer := newSyncer(sshServerPort, localDir, codespaceDir, excludes, deleteFiles)
+	syncNotifier := syncer.TransferNotify()
 	go func() {
 		if err := syncer.Sync(ctx); err != nil {
 			errch <- fmt.Errorf("sync failed: %w", err)
 		}
 	}()
+	a.opdone()
 
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
-	fmt.Println("Syncing codespace to local...")
+	a.op("Syncing codespace to local")
 	if err := syncer.SyncToLocal(ctx); err != nil {
 		return fmt.Errorf("sync to local failed: %w", err)
 	}
+	a.opdone()
 
 	// Start the file watcher and rsync on debounced changes, half a second.
+	a.op("Starting file watcher")
 	watcher, err := newWatcher(syncer)
 	if err != nil {
 		return fmt.Errorf("new watcher failed: %w", err)
 	}
-	fmt.Println("Starting watcher...")
 	go func() {
 		if err := watcher.Watch(ctx); err != nil {
 			errch <- fmt.Errorf("watcher failed: %w", err)
 		}
 	}()
+	a.opdone()
 
-	fmt.Println("Available commands: [s = sync from codespace to local, q = quit]")
+	a.showAvailableCommands()
 
-	// Wait for the watcher or the ssh server to fail.
-	select {
-	case err := <-errch:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errch:
+			return err
+		case t := <-syncNotifier:
+			a.showSync(t)
+		}
 	}
 
 	return nil
 }
 
+func (a *App) showSync(t syncType) {
+	syncRecord := fmt.Sprintf("[INFO] Synced to %s on: %s\n", t, time.Now().Format(time.RFC1123))
+	fmt.Fprintf(os.Stdout, syncRecord)
+}
+
+const availableCommands = `
+Available commands
+	s = sync to local
+	d = sync to local w/ deletion
+	q = quit
+`
+
+func (a *App) showAvailableCommands() {
+	fmt.Println(availableCommands)
+}
+
 func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
+	a.op("Fetching codespaces")
 	codespaces, err := ListCodespaces(ctx)
+	a.opdone()
 	if err != nil {
 		return "", "", fmt.Errorf("list codespaces failed: %w", err)
 	}
@@ -129,7 +164,6 @@ func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 		codespacesByName = append(codespacesByName, name)
 		codespacesIndex[name] = codespace
 	}
-
 	qs := []*survey.Question{
 		{
 			Name: "codespace",
@@ -161,4 +195,13 @@ func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServ
 	case username := <-s.Ready():
 		return username, nil
 	}
+}
+
+func (a *App) op(msg string) {
+	a.spinner.Suffix = fmt.Sprintf(" %s", msg)
+	a.spinner.Start()
+}
+
+func (a *App) opdone() {
+	a.spinner.Stop()
 }
