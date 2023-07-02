@@ -45,7 +45,7 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 		}
 	}()
 
-	errch := make(chan error, 2) // sshServer, watcher
+	errch := make(chan error, 3) // sshServer, watcher, syncer
 	defer close(errch)
 
 	fmt.Println("Connecting to Codespace...")
@@ -75,6 +75,11 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 	localDir := filepath.Join(wd, workspace)
 	excludes := []string{".git"}
 	syncer := newSyncer(sshServerPort, localDir, codespaceDir, excludes)
+	go func() {
+		if err := syncer.Sync(ctx); err != nil {
+			errch <- fmt.Errorf("sync failed: %w", err)
+		}
+	}()
 
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.

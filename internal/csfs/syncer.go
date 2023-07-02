@@ -3,8 +3,8 @@ package csfs
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
+	"time"
 )
 
 type syncer struct {
@@ -12,19 +12,45 @@ type syncer struct {
 	localDir     string
 	codespaceDir string
 	excludes     []string
+
+	syncToCodespace chan struct{}
 }
 
 func newSyncer(port int, localDir, codespaceDir string, excludes []string) *syncer {
 	return &syncer{
-		port:         port,
-		localDir:     localDir,
-		codespaceDir: codespaceDir,
-		excludes:     excludes,
+		port:            port,
+		localDir:        localDir,
+		codespaceDir:    codespaceDir,
+		excludes:        excludes,
+		syncToCodespace: make(chan struct{}),
 	}
 }
 
 func (s *syncer) SyncToLocal(ctx context.Context) error {
 	return s.sync(ctx, s.codespaceDir, s.localDir, s.excludes)
+}
+
+func (s *syncer) SyncToCodespace(ctx context.Context) {
+	select {
+	case s.syncToCodespace <- struct{}{}:
+	default:
+	}
+}
+
+func (s *syncer) Sync(ctx context.Context) error {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			<-s.syncToCodespace
+			if err := s.sync(ctx, s.localDir, s.codespaceDir, s.excludes); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []string) error {
@@ -42,10 +68,7 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 		args = append(args, "--exclude", exclude)
 	}
 	args = append(args, srcDirWithSuffix(src), dest)
-	fmt.Println("rsync", args)
 	cmd := exec.CommandContext(ctx, "rsync", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
