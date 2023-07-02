@@ -10,10 +10,12 @@ import (
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/briandowns/spinner"
+	"github.com/eiannone/keyboard"
 )
 
 type App struct {
 	spinner *spinner.Spinner
+	syncer  *syncer
 }
 
 func NewApp() *App {
@@ -53,7 +55,7 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 		}
 	}()
 
-	errch := make(chan error, 3) // sshServer, watcher, syncer
+	errch := make(chan error, 4) // sshServer, watcher, syncer, keyEvents
 	defer close(errch)
 
 	a.op("Connecting to codespace")
@@ -88,10 +90,11 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	if len(exclude) > 0 {
 		excludes = append(excludes, exclude...)
 	}
-	syncer := newSyncer(sshServerPort, localDir, codespaceDir, excludes, deleteFiles)
-	syncNotifier := syncer.TransferNotify()
+
+	a.syncer = newSyncer(sshServerPort, localDir, codespaceDir, excludes)
+	syncNotifier := a.syncer.SyncNotify()
 	go func() {
-		if err := syncer.Sync(ctx); err != nil {
+		if err := a.syncer.Sync(ctx); err != nil {
 			errch <- fmt.Errorf("sync failed: %w", err)
 		}
 	}()
@@ -100,14 +103,14 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
 	a.op("Syncing codespace to local")
-	if err := syncer.SyncToLocal(ctx); err != nil {
+	if err := a.syncer.SyncToLocal(ctx, deleteFiles); err != nil {
 		return fmt.Errorf("sync to local failed: %w", err)
 	}
 	a.opdone()
 
 	// Start the file watcher and rsync on debounced changes, half a second.
 	a.op("Starting file watcher")
-	watcher, err := newWatcher(syncer)
+	watcher, err := newWatcher(a.syncer)
 	if err != nil {
 		return fmt.Errorf("new watcher failed: %w", err)
 	}
@@ -118,23 +121,57 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	}()
 	a.opdone()
 
-	a.showAvailableCommands()
+	keyEvents, err := keyboard.GetKeys(1)
+	if err != nil {
+		return fmt.Errorf("get keys failed: %w", err)
+	}
 
+	a.showAvailableCommands()
+	exit := make(chan struct{}, 1)
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-errch:
 			return err
+		case <-exit:
+			return nil
 		case t := <-syncNotifier:
 			a.showSync(t)
+		case e := <-keyEvents:
+			if e.Err != nil {
+				return fmt.Errorf("key event failed: %w", e.Err)
+			}
+			go func() {
+				if err := a.processKeyEvent(ctx, exit, e); err != nil {
+					errch <- fmt.Errorf("process key event failed: %w", err)
+				}
+			}()
 		}
 	}
 
 	return nil
 }
 
+func (a *App) processKeyEvent(ctx context.Context, exit chan struct{}, e keyboard.KeyEvent) error {
+	if e.Key == keyboard.KeyCtrlC || e.Key == keyboard.KeyCtrlD || e.Rune == 'q' {
+		exit <- struct{}{}
+	}
+	if e.Rune == 's' || e.Rune == 'd' {
+		withDeletion := e.Rune == 'd'
+		a.op("Syncing codespace to local")
+		if err := a.syncer.SyncToLocal(ctx, withDeletion); err != nil {
+			return fmt.Errorf("sync to local failed: %w", err)
+		}
+		a.opdone()
+	}
+	return nil
+}
+
 func (a *App) showSync(t syncType) {
+	// Don't append a sync record if the spinner is active. Wait for it to stop.
+	for a.spinner.Active() {
+	}
 	syncRecord := fmt.Sprintf("[INFO] Synced to %s on: %s\n", t, time.Now().Format(time.RFC1123))
 	fmt.Fprintf(os.Stdout, syncRecord)
 }

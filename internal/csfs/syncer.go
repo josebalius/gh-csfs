@@ -30,30 +30,28 @@ type syncer struct {
 	localDir     string
 	codespaceDir string
 	excludes     []string
-	deleteFiles  bool
 
 	syncToCodespace chan struct{}
-	transferNotify  chan syncType
+	syncNotify      chan syncType
 }
 
-func newSyncer(port int, localDir, codespaceDir string, excludes []string, deleteFiles bool) *syncer {
+func newSyncer(port int, localDir, codespaceDir string, excludes []string) *syncer {
 	return &syncer{
 		port:            port,
 		localDir:        localDir,
 		codespaceDir:    codespaceDir,
 		excludes:        excludes,
-		deleteFiles:     deleteFiles,
 		syncToCodespace: make(chan struct{}),
-		transferNotify:  make(chan syncType),
+		syncNotify:      make(chan syncType),
 	}
 }
 
-func (s *syncer) TransferNotify() <-chan syncType {
-	return s.transferNotify
+func (s *syncer) SyncNotify() <-chan syncType {
+	return s.syncNotify
 }
 
-func (s *syncer) SyncToLocal(ctx context.Context) error {
-	return s.sync(ctx, s.codespaceDir, s.localDir, s.excludes)
+func (s *syncer) SyncToLocal(ctx context.Context, deleteFiles bool) error {
+	return s.sync(ctx, s.codespaceDir, s.localDir, s.excludes, deleteFiles)
 }
 
 func (s *syncer) SyncToCodespace(ctx context.Context) {
@@ -71,7 +69,7 @@ func (s *syncer) Sync(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			<-s.syncToCodespace
-			if err := s.sync(ctx, s.localDir, s.codespaceDir, s.excludes); err != nil {
+			if err := s.sync(ctx, s.localDir, s.codespaceDir, s.excludes, true); err != nil {
 				return err
 			}
 		}
@@ -79,7 +77,7 @@ func (s *syncer) Sync(ctx context.Context) error {
 	return nil
 }
 
-func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []string) error {
+func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []string, deleteFiles bool) error {
 	args := []string{
 		"--archive",
 		"--compress",
@@ -88,7 +86,7 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 		"-e",
 		fmt.Sprintf("ssh -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no", s.port),
 	}
-	if s.deleteFiles {
+	if deleteFiles {
 		args = append(args, "--delete")
 	}
 	for _, exclude := range excludePaths {
@@ -105,7 +103,7 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 		t = syncTypeCodespace
 	}
 	select {
-	case s.transferNotify <- t:
+	case s.syncNotify <- t:
 	default:
 	}
 
