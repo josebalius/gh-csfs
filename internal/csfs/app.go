@@ -17,7 +17,7 @@ func NewApp() *App {
 	return &App{}
 }
 
-func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) {
+func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []string) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -59,7 +59,8 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 	fmt.Println("Waiting for server to be ready...")
 	sshServerCtx, sshServerCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer sshServerCancel()
-	if err := a.waitForSSHServer(sshServerCtx, errch, sshServer); err != nil {
+	username, err := a.waitForSSHServer(sshServerCtx, errch, sshServer)
+	if err != nil {
 		if err == context.DeadlineExceeded {
 			return errors.New("SSH Server timed out")
 		}
@@ -67,13 +68,16 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 	}
 
 	fmt.Println("Server is ready.")
-	codespaceDir := fmt.Sprintf("codespace@localhost:/workspaces/%s", workspace)
+	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", username, workspace)
 	wd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getwd failed: %w", err)
 	}
 	localDir := filepath.Join(wd, workspace)
 	excludes := []string{".git"}
+	if len(exclude) > 0 {
+		excludes = append(excludes, exclude...)
+	}
 	syncer := newSyncer(sshServerPort, localDir, codespaceDir, excludes)
 	go func() {
 		if err := syncer.Sync(ctx); err != nil {
@@ -148,13 +152,13 @@ func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 	return codespace.Name, codespace.Workspace(), nil
 }
 
-func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) error {
+func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) (string, error) {
 	select {
 	case err := <-errch:
-		return err
+		return "", err
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.Ready():
+		return "", ctx.Err()
+	case username := <-s.Ready():
+		return username, nil
 	}
-	return nil
 }

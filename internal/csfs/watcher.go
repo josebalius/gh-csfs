@@ -2,6 +2,7 @@ package csfs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,7 +26,7 @@ func newWatcher(s *syncer) (*watcher, error) {
 
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create watcher: %w", err)
 	}
 
 	// Recursively travel tree, and collect directories to watch.
@@ -45,14 +46,13 @@ func newWatcher(s *syncer) (*watcher, error) {
 		if info.IsDir() {
 			err = w.Add(newPath)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to add %s to watcher: %w", newPath, err)
 			}
 		}
 		return nil
 	})
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to walk %s: %w", s.localDir, err)
 	}
 
 	return &watcher{syncer: s, watcher: w}, nil

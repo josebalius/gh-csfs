@@ -58,8 +58,6 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 		"--archive",
 		"--compress",
 		"--delete",
-		"--human-readable",
-		"--verbose",
 		"--update",
 		"-e",
 		fmt.Sprintf("ssh -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no", s.port),

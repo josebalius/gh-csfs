@@ -12,14 +12,14 @@ type sshServer struct {
 	codespace string
 
 	ghProcess *exec.Cmd
-	ready     chan struct{}
+	ready     chan string
 }
 
 func newSSHServer(port int, codespace string) *sshServer {
 	return &sshServer{
 		port:      port,
 		codespace: codespace,
-		ready:     make(chan struct{}),
+		ready:     make(chan string),
 	}
 }
 
@@ -49,15 +49,15 @@ func (s *sshServer) Listen(ctx context.Context) error {
 	return s.ghProcess.Run()
 }
 
-func (s *sshServer) Ready() <-chan struct{} {
+func (s *sshServer) Ready() <-chan string {
 	return s.ready
 }
 
 type writer struct {
-	ready chan struct{}
+	ready chan string
 }
 
-func newWriter(ready chan struct{}) *writer {
+func newWriter(ready chan string) *writer {
 	return &writer{
 		ready: ready,
 	}
@@ -65,6 +65,15 @@ func newWriter(ready chan struct{}) *writer {
 
 func (w *writer) Write(p []byte) (n int, err error) {
 	if bytes.HasPrefix(p, []byte("Connection Details")) {
+		p := bytes.Split(p, []byte("@"))
+		if len(p) != 2 {
+			return 0, fmt.Errorf("invalid connection details: %s", p)
+		}
+		p2 := bytes.Split(p[0], []byte(" "))
+		if len(p2) != 4 {
+			return 0, fmt.Errorf("invalid connection details for username: %s", p)
+		}
+		w.ready <- string(p2[len(p2)-1])
 		close(w.ready)
 	}
 	return len(p), nil
