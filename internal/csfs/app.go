@@ -22,13 +22,17 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 	defer cancel()
 
 	if codespace == "" {
-		codespace, err = a.pickCodespace(ctx)
+		c, codespaceWorkspace, err := a.pickCodespace(ctx)
 		if err != nil {
 			return fmt.Errorf("pick codespace failed: %w", err)
 		}
+		codespace = c
+		if workspace == "" {
+			workspace = codespaceWorkspace
+		}
 	}
 	if workspace == "" {
-		workspace = "codespace"
+		return errors.New("workspace is required")
 	}
 
 	// Start the SSH Server and wait for it to be ready,
@@ -104,10 +108,10 @@ func (a *App) Run(ctx context.Context, codespace, workspace string) (err error) 
 	return nil
 }
 
-func (a *App) pickCodespace(ctx context.Context) (string, error) {
+func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 	codespaces, err := ListCodespaces(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list codespaces failed: %w", err)
+		return "", "", fmt.Errorf("list codespaces failed: %w", err)
 	}
 	var codespacesByName []string
 	codespacesIndex := make(map[string]Codespace)
@@ -130,13 +134,13 @@ func (a *App) pickCodespace(ctx context.Context) (string, error) {
 		Codespace string
 	}{}
 	if err := survey.Ask(qs, &answers); err != nil {
-		return "", fmt.Errorf("survey failed: %w", err)
+		return "", "", fmt.Errorf("survey failed: %w", err)
 	}
 	codespace, ok := codespacesIndex[answers.Codespace]
 	if !ok {
-		return "", fmt.Errorf("codespace not found: %s", answers.Codespace)
+		return "", "", fmt.Errorf("codespace not found: %s", answers.Codespace)
 	}
-	return codespace.Name, nil
+	return codespace.Name, codespace.Workspace(), nil
 }
 
 func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) error {

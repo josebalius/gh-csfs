@@ -25,7 +25,7 @@ func newSSHServer(port int, codespace string) *sshServer {
 
 func (s *sshServer) Close() error {
 	if s.ghProcess != nil && s.ghProcess.Process != nil {
-		s.ghProcess.Process.Kill()
+		return s.ghProcess.Process.Kill()
 	}
 	return nil
 }
@@ -38,17 +38,15 @@ func (s *sshServer) Listen(ctx context.Context) error {
 		"-c",
 		s.codespace,
 		fmt.Sprintf("--server-port=%d", s.port),
+		"--",
+		"-tt",
 	}
 
 	s.ghProcess = exec.CommandContext(ctx, "gh", args...)
 	s.ghProcess.Stderr = w
 	s.ghProcess.Stdout = w
 
-	if err := s.ghProcess.Start(); err != nil {
-		return fmt.Errorf("failed to start gh: %w", err)
-	}
-
-	return s.ghProcess.Wait()
+	return s.ghProcess.Run()
 }
 
 func (s *sshServer) Ready() <-chan struct{} {

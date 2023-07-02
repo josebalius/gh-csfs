@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type Codespace struct {
 	Name        string     `json:"name"`
 	DisplayName string     `json:"display_name"`
 	Repository  Repository `json:"repository"`
+}
+
+func (c Codespace) Workspace() string {
+	s := strings.Split(c.Repository.FullName, "/")
+	return s[len(s)-1]
 }
 
 type Repository struct {

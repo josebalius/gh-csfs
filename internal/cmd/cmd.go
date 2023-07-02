@@ -27,7 +27,7 @@ Additionally, csfs requires the GitHub command-line tool (gh) and rsync to be in
 	}
 
 	cmd.Flags().StringVarP(&codespace, "codespace", "c", "", "codespace to use")
-	cmd.Flags().StringVarP(&workspace, "workspace", "w", "codespace", "workspace to use")
+	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "workspace to use")
 
 	return cmd
 }

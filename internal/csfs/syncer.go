@@ -3,6 +3,7 @@ package csfs
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -29,22 +30,22 @@ func (s *syncer) SyncToLocal(ctx context.Context) error {
 func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []string) error {
 	args := []string{
 		"--archive",
+		"--compress",
 		"--delete",
 		"--human-readable",
 		"--verbose",
 		"--update",
 		"-e",
-		fmt.Sprintf(
-			"ssh codespace@localhost -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no",
-			s.port,
-		),
+		fmt.Sprintf("ssh -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no", s.port),
 	}
 	for _, exclude := range excludePaths {
 		args = append(args, "--exclude", exclude)
 	}
 	args = append(args, srcDirWithSuffix(src), dest)
+	fmt.Println("rsync", args)
 	cmd := exec.CommandContext(ctx, "rsync", args...)
-	cmd.Dir = src
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
