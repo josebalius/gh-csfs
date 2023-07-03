@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
 type sshServerConn struct {
@@ -35,16 +37,56 @@ func (s *sshServer) Close() error {
 }
 
 func (s *sshServer) Listen(ctx context.Context) error {
-	errch := make(chan error, 2) // writer + process
-	w := newWriter(errch, s.ready)
+	errch := make(chan error, 3)       // writer + process + ensureReady
+	wch := make(chan sshServerConn, 1) // writer
+	w := newWriter(errch, wch)
 	args := []string{"cs", "ssh", "-c", s.codespace, "--server-port=0", "--", "-tt"}
 	s.ghProcess = exec.CommandContext(ctx, "gh", args...)
 	s.ghProcess.Stderr = w
 	s.ghProcess.Stdout = w
 	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case conn := <-wch:
+			// writer has received the connection details, test the port is listening
+			if err := s.ensureReady(ctx, conn); err != nil {
+				errch <- fmt.Errorf("failed to ensure port is ready: %w", err)
+				return
+			}
+			s.ready <- conn
+		}
+	}()
+	go func() {
 		errch <- s.ghProcess.Run()
 	}()
-	return <-errch
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errch:
+			return err
+		}
+	}
+}
+
+func (s *sshServer) ensureReady(ctx context.Context, c sshServerConn) error {
+	dialer := net.Dialer{
+		Timeout: 500 * time.Millisecond,
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf(":%d", c.Port))
+			if err == nil {
+				conn.Close()
+				return nil
+			}
+		}
+	}
+	return nil
 }
 
 func (s *sshServer) Ready() <-chan sshServerConn {
