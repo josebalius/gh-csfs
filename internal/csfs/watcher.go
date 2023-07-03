@@ -16,22 +16,8 @@ type watcher struct {
 }
 
 func newWatcher(s *syncer, watch []string) (*watcher, error) {
-	excludedPathsSet := make(map[string]struct{})
-	for _, exclude := range s.excludes {
-		if exclude[0] != '/' {
-			exclude = path.Join(s.localDir, exclude)
-		}
-		excludedPathsSet[exclude] = struct{}{}
-	}
-	includePathsSet := make(map[string]struct{})
-	var hasWatch bool
-	for _, include := range watch {
-		if include[0] != '/' {
-			hasWatch = true
-			include = path.Join(s.localDir, include)
-		}
-		includePathsSet[include] = struct{}{}
-	}
+	excludedPathsSet := excludedPathsSet(s.localDir, s.excludes)
+	hasWatch, includedPathsSet := includedPathsSet(s.localDir, watch)
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create watcher: %w", err)
@@ -51,7 +37,7 @@ func newWatcher(s *syncer, watch []string) (*watcher, error) {
 		if info.IsDir() {
 			if hasWatch {
 				// Skip directories that are not in the watch list.
-				if _, ok := includePathsSet[newPath]; !ok {
+				if _, ok := includedPathsSet[newPath]; !ok {
 					return filepath.SkipDir
 				}
 			}
@@ -66,6 +52,31 @@ func newWatcher(s *syncer, watch []string) (*watcher, error) {
 		return nil, fmt.Errorf("failed to walk %s: %w", s.localDir, err)
 	}
 	return &watcher{syncer: s, watcher: w}, nil
+}
+
+func excludedPathsSet(dir string, excludes []string) map[string]struct{} {
+	excludedPathsSet := make(map[string]struct{})
+	for _, exclude := range excludes {
+		if exclude[0] != '/' {
+			exclude = path.Join(dir, exclude)
+		}
+		excludedPathsSet[exclude] = struct{}{}
+	}
+	return excludedPathsSet
+}
+
+func includedPathsSet(dir string, included []string) (bool, map[string]struct{}) {
+	if len(included) == 0 {
+		return false, nil
+	}
+	includePathsSet := make(map[string]struct{})
+	for _, include := range included {
+		if include[0] != '/' {
+			include = path.Join(dir, include)
+		}
+		includePathsSet[include] = struct{}{}
+	}
+	return true, includePathsSet
 }
 
 func (w *watcher) Watch(ctx context.Context) error {

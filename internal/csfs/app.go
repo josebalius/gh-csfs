@@ -40,18 +40,6 @@ func NewApp() *App {
 // Run runs the application, it will have the user pick a codespace if none is provided.
 // If the workspace cannot be computed from the codespace (rare and unexpected) it will
 // return an error.
-//
-// The main flow is:
-// 1. Start the SSH Server.
-// 2. Wait for the SSH Server to be ready.
-// 3. Setup the sync operations.
-// 4. Sync the workspace dir to the current directory under the workspace dir name.
-// 5. Start the file watcher and rsync on debounced changes, half a second.
-// 6. Start the keyboard listener.
-// 7. Wait for the user to press a key.
-// 8. Process the key event.
-// 9. If the key event is a quit key, exit.
-// 10. If the key event is a sync key, sync the workspace dir to the current directory.
 func (a *App) Run(
 	ctx context.Context, opts AppOptions,
 ) (err error) {
@@ -118,8 +106,9 @@ func (a *App) Run(
 	}
 
 	// Setup sync operations.
+	var workspaceExists bool
 	err = a.op("Setting up sync opertions", func() error {
-		a.syncer, err = a.setupSyncer(conn, opts.Workspace, opts.Exclude)
+		a.syncer, workspaceExists, err = a.setupSyncer(conn, opts.Workspace, opts.Exclude)
 		return err
 	})
 	if err != nil {
@@ -133,11 +122,8 @@ func (a *App) Run(
 
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
-	err = a.op("Syncing codespace to local", func() error {
-		return a.syncer.SyncToLocal(ctx, opts.DeleteFiles)
-	})
-	if err != nil {
-		return fmt.Errorf("sync to local failed: %w", err)
+	if err := a.initialSync(ctx, workspaceExists, opts.DeleteFiles); err != nil {
+		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
 	// Start the file watcher and rsync on debounced changes, half a second.
@@ -184,19 +170,40 @@ func (a *App) Run(
 	}
 }
 
-func (a *App) setupSyncer(conn sshServerConn, workspace string, exclude []string) (*syncer, error) {
+func (a *App) initialSync(ctx context.Context, workspaceExists, deleteFiles bool) error {
+	op := "Syncing codespace to local"
+	if !workspaceExists {
+		op = "Cloning codespace to local"
+	}
+	return a.op(op, func() error {
+		if !workspaceExists {
+			return a.syncer.InitialSync(ctx)
+		}
+		return a.syncer.SyncToLocal(ctx, deleteFiles)
+	})
+}
+
+func (a *App) setupSyncer(conn sshServerConn, workspace string, exclude []string) (*syncer, bool, error) {
 	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", conn.Username, workspace)
 	wd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("getwd failed: %w", err)
+		return nil, false, fmt.Errorf("getwd failed: %w", err)
 	}
 	localDir := filepath.Join(wd, workspace)
+	workspaceExists := true
+	if _, err := os.Stat(localDir); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, false, fmt.Errorf("stat local dir failed: %w", err)
+		}
+		// Workspace does not exist locally
+		workspaceExists = false
+	}
 	excludes := []string{".git"}
 	if len(exclude) > 0 {
 		excludes = append(excludes, exclude...)
 	}
 	a.syncer = newSyncer(conn.Port, localDir, codespaceDir, excludes, 500*time.Millisecond)
-	return a.syncer, nil
+	return a.syncer, workspaceExists, nil
 }
 
 const availableCommands = `

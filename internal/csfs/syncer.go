@@ -2,6 +2,7 @@ package csfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -55,9 +56,10 @@ func (s *syncer) Event() <-chan syncType {
 	return s.syncEvent
 }
 
-// TODO(josebalius): Figure out best strategy for first-time sync.
-// Is rsync better than scp? Could we use parallelize the process off of the
-// top level directories using either?
+func (s *syncer) InitialSync(ctx context.Context) error {
+	return errors.New("not implemented")
+}
+
 func (s *syncer) SyncToLocal(ctx context.Context, deleteFiles bool) error {
 	return s.sync(ctx, s.codespaceDir, s.localDir, s.excludes, deleteFiles)
 }
