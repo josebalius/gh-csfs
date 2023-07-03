@@ -60,13 +60,11 @@ func (s *sshServer) Listen(ctx context.Context) error {
 	go func() {
 		errch <- s.ghProcess.Run()
 	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-errch:
-			return err
-		}
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errch:
+		return err
 	}
 }
 
@@ -77,7 +75,7 @@ func (s *sshServer) ensureReady(ctx context.Context, c sshServerConn) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		default:
 			conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf(":%d", c.Port))
 			if err == nil {
@@ -105,10 +103,6 @@ func newWriter(errch chan error, ready chan sshServerConn) *writer {
 	}
 }
 
-// TODO(josebalius): This process needs to check that the port is actually ready
-// for connections since these details are printed before the SSH server actually comes up
-// and it is possible that the port is not ready yet.
-// Probably should happen outside of the writer.
 func (w *writer) Write(p []byte) (n int, err error) {
 	if bytes.HasPrefix(p, []byte("Connection Details")) {
 		p := bytes.Split(p, []byte(" "))

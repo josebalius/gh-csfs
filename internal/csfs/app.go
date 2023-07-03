@@ -47,7 +47,7 @@ func (a *App) Run(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errch := make(chan error, 4) // sshServer, watcher, syncer, keyEvents
+	errch := make(chan error, 3) // sshServer, watcher, syncer
 	defer close(errch)
 
 	codespace, err := a.getOrChooseCodespace(ctx, codespaceName)
@@ -92,8 +92,6 @@ func (a *App) Run(
 
 	var conn sshServerConn
 	err = a.op(op, func() error {
-		// TODO(josebalius): check status of the codespace, if is stopped, notify the user that the timeout
-		// will be increased to 120 seconds, it'll never spin up in 10 seconds.
 		conn, err = a.waitForSSHServer(sshServerCtx, errch, server)
 		return err
 	})
@@ -104,6 +102,7 @@ func (a *App) Run(
 		return fmt.Errorf("ssh server ready failed: %w", err)
 	}
 
+	// Setup sync operations.
 	err = a.op("Setting up sync opertions", func() error {
 		a.syncer, err = a.setupSyncer(conn, workspace, exclude)
 		return err
@@ -156,16 +155,16 @@ func (a *App) Run(
 		case <-exit:
 			return nil
 		case e := <-a.syncer.Event():
-			a.showSync(e)
+			if err := a.showSync(e); err != nil {
+				return fmt.Errorf("show sync failed: %w", err)
+			}
 		case e := <-keyEvents:
 			if e.Err != nil {
 				return fmt.Errorf("key event failed: %w", e.Err)
 			}
-			go func() {
-				if err := a.processKeyEvent(ctx, exit, e); err != nil {
-					errch <- fmt.Errorf("process key event failed: %w", err)
-				}
-			}()
+			if err := a.processKeyEvent(ctx, exit, e); err != nil {
+				return fmt.Errorf("process key event failed: %w", err)
+			}
 		}
 	}
 }
@@ -204,7 +203,9 @@ func (a *App) processKeyEvent(ctx context.Context, exit chan struct{}, e keyboar
 		a.outputmu.Lock()
 		defer a.outputmu.Unlock()
 
-		fmt.Fprintln(os.Stdout, "")
+		if _, err := fmt.Fprintln(os.Stdout, ""); err != nil {
+			return fmt.Errorf("enter println failed: %w", err)
+		}
 	}
 	if e.Rune == 's' || e.Rune == 'd' {
 		var withDeletion bool
@@ -223,13 +224,16 @@ func (a *App) processKeyEvent(ctx context.Context, exit chan struct{}, e keyboar
 	return nil
 }
 
-func (a *App) showSync(e syncType) {
+func (a *App) showSync(e syncType) error {
 	a.outputmu.Lock()
 	defer a.outputmu.Unlock()
 
 	// TODO(josebalius): Figure out how to not to collide with the spinner.
 	syncRecord := fmt.Sprintf("[INFO][%s] Synced to %s\n", time.Now().Format(time.RFC1123), e)
-	fmt.Fprintf(os.Stdout, syncRecord)
+	if _, err := fmt.Fprintf(os.Stdout, syncRecord); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *App) getOrChooseCodespace(ctx context.Context, codespace string) (Codespace, error) {

@@ -55,6 +55,9 @@ func (s *syncer) Event() <-chan syncType {
 	return s.syncEvent
 }
 
+// TODO(josebalius): Figure out best strategy for first-time sync.
+// Is rsync better than scp? Could we use parallelize the process off of the
+// top level directories using either?
 func (s *syncer) SyncToLocal(ctx context.Context, deleteFiles bool) error {
 	return s.sync(ctx, s.codespaceDir, s.localDir, s.excludes, deleteFiles)
 }
@@ -71,7 +74,7 @@ func (s *syncer) Sync(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		case <-ticker.C:
 			<-s.syncToCodespace
 			if err := s.sync(ctx, s.localDir, s.codespaceDir, s.excludes, true); err != nil {
@@ -88,6 +91,7 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 		"--compress",
 		"--update",
 		"--perms",
+		"--hard-links",
 		"-e",
 		fmt.Sprintf("ssh -p %d -o NoHostAuthenticationForLocalhost=yes -o PasswordAuthentication=no", s.port),
 	}
