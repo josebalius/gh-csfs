@@ -41,26 +41,30 @@ func NewApp() *App {
 // 8. Process the key event.
 // 9. If the key event is a quit key, exit.
 // 10. If the key event is a sync key, sync the workspace dir to the current directory.
-func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []string, deleteFiles bool) (err error) {
+func (a *App) Run(
+	ctx context.Context, codespaceName, workspace string, exclude []string, deleteFiles bool,
+) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errch := make(chan error, 4) // sshServer, watcher, syncer, keyEvents
 	defer close(errch)
 
-	codespace, workspace, err = a.getOrChooseCodespace(ctx, codespace, workspace)
+	codespace, err := a.getOrChooseCodespace(ctx, codespaceName)
 	if err != nil {
 		return fmt.Errorf("get or choose codespace failed: %w", err)
 	}
 	if workspace == "" {
-		return errors.New("workspace is required")
+		if workspace = codespace.Workspace(); workspace == "" {
+			return errors.New("workspace is required")
+		}
 	}
 
 	// Start the SSH Server and wait for it to be ready,
 	// timeout after 10 seconds, or if the server fails to start.
 	var server *sshServer
 	if err := a.op("Connecting to codespace", func() error {
-		server = newSSHServer(codespace)
+		server = newSSHServer(codespace.Name)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("new ssh server failed: %w", err)
@@ -77,10 +81,17 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 	}()
 
 	// Wait for the ssh server to be ready, or timeout.
-	var conn sshServerConn
-	sshServerCtx, sshServerCancel := context.WithTimeout(ctx, 10*time.Second)
+	timeout := 10 * time.Second
+	op := "Waiting for server to be ready"
+	if !codespace.Active() {
+		timeout = 120 * time.Second
+		op = "Starting server, this may take a few minutes"
+	}
+	sshServerCtx, sshServerCancel := context.WithTimeout(ctx, timeout)
 	defer sshServerCancel()
-	err = a.op("Waiting for server to be ready", func() error {
+
+	var conn sshServerConn
+	err = a.op(op, func() error {
 		// TODO(josebalius): check status of the codespace, if is stopped, notify the user that the timeout
 		// will be increased to 120 seconds, it'll never spin up in 10 seconds.
 		conn, err = a.waitForSSHServer(sshServerCtx, errch, server)
@@ -221,30 +232,22 @@ func (a *App) showSync(e syncType) {
 	fmt.Fprintf(os.Stdout, syncRecord)
 }
 
-func (a *App) getOrChooseCodespace(ctx context.Context, codespace, workspace string) (string, string, error) {
+func (a *App) getOrChooseCodespace(ctx context.Context, codespace string) (Codespace, error) {
 	if codespace == "" {
-		c, w, err := a.pickCodespace(ctx)
+		c, err := a.pickCodespace(ctx)
 		if err != nil {
-			return "", "", fmt.Errorf("pick codespace failed: %w", err)
+			return c, fmt.Errorf("pick codespace failed: %w", err)
 		}
-		codespace = c
-		if workspace == "" {
-			workspace = w
-		}
-		return codespace, workspace, nil
+		return c, nil
 	}
 	c, err := GetCodespace(ctx, codespace)
 	if err != nil {
-		return "", "", fmt.Errorf("get codespace failed: %w", err)
+		return c, fmt.Errorf("get codespace failed: %w", err)
 	}
-	codespace = c.Name
-	if workspace == "" {
-		workspace = c.Workspace()
-	}
-	return codespace, workspace, nil
+	return c, nil
 }
 
-func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
+func (a *App) pickCodespace(ctx context.Context) (Codespace, error) {
 	var codespaces []Codespace
 	var err error
 	err = a.op("Fetching codespaces", func() error {
@@ -252,7 +255,7 @@ func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 		return err
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("list codespaces failed: %w", err)
+		return Codespace{}, fmt.Errorf("list codespaces failed: %w", err)
 	}
 	var codespacesByName []string
 	codespacesIndex := make(map[string]Codespace)
@@ -274,13 +277,13 @@ func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 		Codespace string
 	}{}
 	if err := survey.Ask(qs, &answers); err != nil {
-		return "", "", fmt.Errorf("survey failed: %w", err)
+		return Codespace{}, fmt.Errorf("survey failed: %w", err)
 	}
 	codespace, ok := codespacesIndex[answers.Codespace]
 	if !ok {
-		return "", "", fmt.Errorf("codespace not found: %s", answers.Codespace)
+		return Codespace{}, fmt.Errorf("codespace not found: %s", answers.Codespace)
 	}
-	return codespace.Name, codespace.Workspace(), nil
+	return codespace, nil
 }
 
 func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) (sshServerConn, error) {

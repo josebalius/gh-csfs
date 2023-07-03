@@ -28,8 +28,8 @@ func newSSHServer(codespace string) *sshServer {
 }
 
 func (s *sshServer) Close() error {
-	if s.ghProcess != nil && s.ghProcess.Process != nil {
-		return s.ghProcess.Process.Kill()
+	if s.ghProcess != nil {
+		return s.ghProcess.Cancel()
 	}
 	return nil
 }
@@ -37,15 +37,7 @@ func (s *sshServer) Close() error {
 func (s *sshServer) Listen(ctx context.Context) error {
 	errch := make(chan error, 2) // writer + process
 	w := newWriter(errch, s.ready)
-	args := []string{
-		"cs",
-		"ssh",
-		"-c",
-		s.codespace,
-		"--server-port=0",
-		"--",
-		"-tt",
-	}
+	args := []string{"cs", "ssh", "-c", s.codespace, "--server-port=0", "--", "-tt"}
 	s.ghProcess = exec.CommandContext(ctx, "gh", args...)
 	s.ghProcess.Stderr = w
 	s.ghProcess.Stdout = w
@@ -71,6 +63,10 @@ func newWriter(errch chan error, ready chan sshServerConn) *writer {
 	}
 }
 
+// TODO(josebalius): This process needs to check that the port is actually ready
+// for connections since these details are printed before the SSH server actually comes up
+// and it is possible that the port is not ready yet.
+// Probably should happen outside of the writer.
 func (w *writer) Write(p []byte) (n int, err error) {
 	if bytes.HasPrefix(p, []byte("Connection Details")) {
 		p := bytes.Split(p, []byte(" "))
