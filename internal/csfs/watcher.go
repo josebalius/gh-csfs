@@ -15,7 +15,7 @@ type watcher struct {
 	syncer  *syncer
 }
 
-func newWatcher(s *syncer) (*watcher, error) {
+func newWatcher(s *syncer, watch []string) (*watcher, error) {
 	excludedPathsSet := make(map[string]struct{})
 	for _, exclude := range s.excludes {
 		if exclude[0] != '/' {
@@ -23,18 +23,24 @@ func newWatcher(s *syncer) (*watcher, error) {
 		}
 		excludedPathsSet[exclude] = struct{}{}
 	}
-
+	includePathsSet := make(map[string]struct{})
+	var hasWatch bool
+	for _, include := range watch {
+		if include[0] != '/' {
+			hasWatch = true
+			include = path.Join(s.localDir, include)
+		}
+		includePathsSet[include] = struct{}{}
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create watcher: %w", err)
 	}
-
 	// Recursively travel tree, and collect directories to watch.
 	err = filepath.Walk(s.localDir, func(newPath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
 		// Skip excluded paths
 		if _, ok := excludedPathsSet[newPath]; ok {
 			if info.IsDir() {
@@ -42,8 +48,13 @@ func newWatcher(s *syncer) (*watcher, error) {
 			}
 			return nil
 		}
-
 		if info.IsDir() {
+			if hasWatch {
+				// Skip directories that are not in the watch list.
+				if _, ok := includePathsSet[newPath]; !ok {
+					return filepath.SkipDir
+				}
+			}
 			err = w.Add(newPath)
 			if err != nil {
 				return fmt.Errorf("failed to add %s to watcher: %w", newPath, err)
@@ -54,7 +65,6 @@ func newWatcher(s *syncer) (*watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to walk %s: %w", s.localDir, err)
 	}
-
 	return &watcher{syncer: s, watcher: w}, nil
 }
 
@@ -62,7 +72,7 @@ func (w *watcher) Watch(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		case <-w.watcher.Events:
 			w.syncer.SyncToCodespace(ctx)
 		case err := <-w.watcher.Errors:

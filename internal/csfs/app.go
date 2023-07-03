@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 	"github.com/briandowns/spinner"
 	"github.com/eiannone/keyboard"
 )
+
+var errInterrupt = errors.New("interrupted")
+
+type AppOptions struct {
+	Codespace   string
+	Workspace   string
+	Exclude     []string
+	DeleteFiles bool
+	Watch       []string
+}
 
 // App is the main application for csfs. It manages the user interaction
 // and the sync operations.
@@ -42,7 +53,7 @@ func NewApp() *App {
 // 9. If the key event is a quit key, exit.
 // 10. If the key event is a sync key, sync the workspace dir to the current directory.
 func (a *App) Run(
-	ctx context.Context, codespaceName, workspace string, exclude []string, deleteFiles bool,
+	ctx context.Context, opts AppOptions,
 ) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -50,12 +61,15 @@ func (a *App) Run(
 	errch := make(chan error, 3) // sshServer, watcher, syncer
 	defer close(errch)
 
-	codespace, err := a.getOrChooseCodespace(ctx, codespaceName)
+	codespace, err := a.getOrChooseCodespace(ctx, opts.Codespace)
 	if err != nil {
+		if errors.Is(err, errInterrupt) {
+			return nil
+		}
 		return fmt.Errorf("get or choose codespace failed: %w", err)
 	}
-	if workspace == "" {
-		if workspace = codespace.Workspace(); workspace == "" {
+	if opts.Workspace == "" {
+		if opts.Workspace = codespace.Workspace(); opts.Workspace == "" {
 			return errors.New("workspace is required")
 		}
 	}
@@ -63,10 +77,11 @@ func (a *App) Run(
 	// Start the SSH Server and wait for it to be ready,
 	// timeout after 10 seconds, or if the server fails to start.
 	var server *sshServer
-	if err := a.op("Connecting to codespace", func() error {
+	err = a.op("Connecting to codespace", func() error {
 		server = newSSHServer(codespace.Name)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("new ssh server failed: %w", err)
 	}
 	defer func() {
@@ -104,7 +119,7 @@ func (a *App) Run(
 
 	// Setup sync operations.
 	err = a.op("Setting up sync opertions", func() error {
-		a.syncer, err = a.setupSyncer(conn, workspace, exclude)
+		a.syncer, err = a.setupSyncer(conn, opts.Workspace, opts.Exclude)
 		return err
 	})
 	if err != nil {
@@ -119,7 +134,7 @@ func (a *App) Run(
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
 	err = a.op("Syncing codespace to local", func() error {
-		return a.syncer.SyncToLocal(ctx, deleteFiles)
+		return a.syncer.SyncToLocal(ctx, opts.DeleteFiles)
 	})
 	if err != nil {
 		return fmt.Errorf("sync to local failed: %w", err)
@@ -128,7 +143,7 @@ func (a *App) Run(
 	// Start the file watcher and rsync on debounced changes, half a second.
 	var watcher *watcher
 	err = a.op("Starting file watcher", func() error {
-		watcher, err = newWatcher(a.syncer)
+		watcher, err = newWatcher(a.syncer, opts.Watch)
 		return err
 	})
 	if err != nil {
@@ -281,6 +296,9 @@ func (a *App) pickCodespace(ctx context.Context) (Codespace, error) {
 		Codespace string
 	}{}
 	if err := survey.Ask(qs, &answers); err != nil {
+		if strings.Contains(err.Error(), "interrupt") {
+			return Codespace{}, errInterrupt
+		}
 		return Codespace{}, fmt.Errorf("survey failed: %w", err)
 	}
 	codespace, ok := codespacesIndex[answers.Codespace]
