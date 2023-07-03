@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -13,33 +14,43 @@ import (
 	"github.com/eiannone/keyboard"
 )
 
+// App is the main application for csfs. It manages the user interaction
+// and the sync operations.
 type App struct {
-	spinner *spinner.Spinner
-	syncer  *syncer
+	syncer   *syncer
+	outputmu sync.Mutex
 }
 
+// NewApp creates a new App, with a spinner.
 func NewApp() *App {
-	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond)
-	return &App{
-		spinner: s,
-	}
+	return &App{}
 }
 
+// Run runs the application, it will have the user pick a codespace if none is provided.
+// If the workspace cannot be computed from the codespace (rare and unexpected) it will
+// return an error.
+//
+// The main flow is:
+// 1. Start the SSH Server.
+// 2. Wait for the SSH Server to be ready.
+// 3. Setup the sync operations.
+// 4. Sync the workspace dir to the current directory under the workspace dir name.
+// 5. Start the file watcher and rsync on debounced changes, half a second.
+// 6. Start the keyboard listener.
+// 7. Wait for the user to press a key.
+// 8. Process the key event.
+// 9. If the key event is a quit key, exit.
+// 10. If the key event is a sync key, sync the workspace dir to the current directory.
 func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []string, deleteFiles bool) (err error) {
-	defer a.opdone()
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if codespace == "" {
-		c, codespaceWorkspace, err := a.pickCodespace(ctx)
-		if err != nil {
-			return fmt.Errorf("pick codespace failed: %w", err)
-		}
-		codespace = c
-		if workspace == "" {
-			workspace = codespaceWorkspace
-		}
+	errch := make(chan error, 4) // sshServer, watcher, syncer, keyEvents
+	defer close(errch)
+
+	codespace, workspace, err = a.getOrChooseCodespace(ctx, codespace, workspace)
+	if err != nil {
+		return fmt.Errorf("get or choose codespace failed: %w", err)
 	}
 	if workspace == "" {
 		return errors.New("workspace is required")
@@ -47,31 +58,34 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 
 	// Start the SSH Server and wait for it to be ready,
 	// timeout after 10 seconds, or if the server fails to start.
-	sshServerPort := 1234 // TODO(josebalius): Pick a random port.
-	sshServer := newSSHServer(sshServerPort, codespace)
+	var server *sshServer
+	if err := a.op("Connecting to codespace", func() error {
+		server = newSSHServer(codespace)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("new ssh server failed: %w", err)
+	}
 	defer func() {
-		if closeErr := sshServer.Close(); closeErr != nil && err == nil {
+		if closeErr := server.Close(); closeErr != nil && err == nil {
 			err = fmt.Errorf("ssh server close failed: %w", closeErr)
 		}
 	}()
-
-	errch := make(chan error, 4) // sshServer, watcher, syncer, keyEvents
-	defer close(errch)
-
-	a.op("Connecting to codespace")
 	go func() {
-		if err := sshServer.Listen(ctx); err != nil {
+		if err := server.Listen(ctx); err != nil {
 			errch <- fmt.Errorf("ssh server failed: %w", err)
 		}
 	}()
-	a.opdone()
 
 	// Wait for the ssh server to be ready, or timeout.
-	a.op("Waiting for server to be ready")
+	var conn sshServerConn
 	sshServerCtx, sshServerCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer sshServerCancel()
-	username, err := a.waitForSSHServer(sshServerCtx, errch, sshServer)
-	a.opdone()
+	err = a.op("Waiting for server to be ready", func() error {
+		// TODO(josebalius): check status of the codespace, if is stopped, notify the user that the timeout
+		// will be increased to 120 seconds, it'll never spin up in 10 seconds.
+		conn, err = a.waitForSSHServer(sshServerCtx, errch, server)
+		return err
+	})
 	if err != nil {
 		if err == context.DeadlineExceeded {
 			return errors.New("SSH Server timed out")
@@ -79,38 +93,34 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 		return fmt.Errorf("ssh server ready failed: %w", err)
 	}
 
-	a.op("Setting up sync opertions")
-	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", username, workspace)
-	wd, err := os.Getwd()
+	err = a.op("Setting up sync opertions", func() error {
+		a.syncer, err = a.setupSyncer(conn, workspace, exclude)
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("getwd failed: %w", err)
+		return fmt.Errorf("setup syncer failed: %w", err)
 	}
-	localDir := filepath.Join(wd, workspace)
-	excludes := []string{".git"}
-	if len(exclude) > 0 {
-		excludes = append(excludes, exclude...)
-	}
-
-	a.syncer = newSyncer(sshServerPort, localDir, codespaceDir, excludes)
-	syncNotifier := a.syncer.SyncNotify()
 	go func() {
 		if err := a.syncer.Sync(ctx); err != nil {
 			errch <- fmt.Errorf("sync failed: %w", err)
 		}
 	}()
-	a.opdone()
 
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
-	a.op("Syncing codespace to local")
-	if err := a.syncer.SyncToLocal(ctx, deleteFiles); err != nil {
+	err = a.op("Syncing codespace to local", func() error {
+		return a.syncer.SyncToLocal(ctx, deleteFiles)
+	})
+	if err != nil {
 		return fmt.Errorf("sync to local failed: %w", err)
 	}
-	a.opdone()
 
 	// Start the file watcher and rsync on debounced changes, half a second.
-	a.op("Starting file watcher")
-	watcher, err := newWatcher(a.syncer)
+	var watcher *watcher
+	err = a.op("Starting file watcher", func() error {
+		watcher, err = newWatcher(a.syncer)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("new watcher failed: %w", err)
 	}
@@ -119,13 +129,11 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 			errch <- fmt.Errorf("watcher failed: %w", err)
 		}
 	}()
-	a.opdone()
 
 	keyEvents, err := keyboard.GetKeys(1)
 	if err != nil {
 		return fmt.Errorf("get keys failed: %w", err)
 	}
-
 	a.showAvailableCommands()
 	exit := make(chan struct{}, 1)
 	for {
@@ -136,8 +144,8 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 			return err
 		case <-exit:
 			return nil
-		case t := <-syncNotifier:
-			a.showSync(t)
+		case e := <-a.syncer.Event():
+			a.showSync(e)
 		case e := <-keyEvents:
 			if e.Err != nil {
 				return fmt.Errorf("key event failed: %w", e.Err)
@@ -149,55 +157,107 @@ func (a *App) Run(ctx context.Context, codespace, workspace string, exclude []st
 			}()
 		}
 	}
-
-	return nil
 }
 
-func (a *App) processKeyEvent(ctx context.Context, exit chan struct{}, e keyboard.KeyEvent) error {
-	if e.Key == keyboard.KeyCtrlC || e.Key == keyboard.KeyCtrlD || e.Rune == 'q' {
-		exit <- struct{}{}
+func (a *App) setupSyncer(conn sshServerConn, workspace string, exclude []string) (*syncer, error) {
+	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", conn.Username, workspace)
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("getwd failed: %w", err)
 	}
-	if e.Rune == 's' || e.Rune == 'd' {
-		withDeletion := e.Rune == 'd'
-		a.op("Syncing codespace to local")
-		if err := a.syncer.SyncToLocal(ctx, withDeletion); err != nil {
-			return fmt.Errorf("sync to local failed: %w", err)
-		}
-		a.opdone()
+	localDir := filepath.Join(wd, workspace)
+	excludes := []string{".git"}
+	if len(exclude) > 0 {
+		excludes = append(excludes, exclude...)
 	}
-	return nil
-}
-
-func (a *App) showSync(t syncType) {
-	// Don't append a sync record if the spinner is active. Wait for it to stop.
-	for a.spinner.Active() {
-	}
-	syncRecord := fmt.Sprintf("[INFO] Synced to %s on: %s\n", t, time.Now().Format(time.RFC1123))
-	fmt.Fprintf(os.Stdout, syncRecord)
+	a.syncer = newSyncer(conn.Port, localDir, codespaceDir, excludes, 500*time.Millisecond)
+	return a.syncer, nil
 }
 
 const availableCommands = `
-Available commands
-	s = sync to local
-	d = sync to local w/ deletion
-	q = quit
+Available commands:
+ s = sync to local
+ d = sync to local w/ deletion
+ q = quit
 `
 
 func (a *App) showAvailableCommands() {
 	fmt.Println(availableCommands)
 }
 
+func (a *App) processKeyEvent(ctx context.Context, exit chan struct{}, e keyboard.KeyEvent) error {
+	if e.Key == keyboard.KeyCtrlC || e.Key == keyboard.KeyCtrlD || e.Rune == 'q' {
+		exit <- struct{}{}
+	}
+	if e.Key == keyboard.KeyEnter {
+		a.outputmu.Lock()
+		defer a.outputmu.Unlock()
+
+		fmt.Fprintln(os.Stdout, "")
+	}
+	if e.Rune == 's' || e.Rune == 'd' {
+		var withDeletion bool
+		op := "Syncing codespace to local"
+		if e.Rune == 'd' {
+			op = "Syncing codespace to local w/ deletion"
+			withDeletion = true
+		}
+		err := a.op(op, func() error {
+			return a.syncer.SyncToLocal(ctx, withDeletion)
+		})
+		if err != nil {
+			return fmt.Errorf("sync to local failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func (a *App) showSync(e syncType) {
+	a.outputmu.Lock()
+	defer a.outputmu.Unlock()
+
+	// TODO(josebalius): Figure out how to not to collide with the spinner.
+	syncRecord := fmt.Sprintf("[INFO][%s] Synced to %s\n", time.Now().Format(time.RFC1123), e)
+	fmt.Fprintf(os.Stdout, syncRecord)
+}
+
+func (a *App) getOrChooseCodespace(ctx context.Context, codespace, workspace string) (string, string, error) {
+	if codespace == "" {
+		c, w, err := a.pickCodespace(ctx)
+		if err != nil {
+			return "", "", fmt.Errorf("pick codespace failed: %w", err)
+		}
+		codespace = c
+		if workspace == "" {
+			workspace = w
+		}
+		return codespace, workspace, nil
+	}
+	c, err := GetCodespace(ctx, codespace)
+	if err != nil {
+		return "", "", fmt.Errorf("get codespace failed: %w", err)
+	}
+	codespace = c.Name
+	if workspace == "" {
+		workspace = c.Workspace()
+	}
+	return codespace, workspace, nil
+}
+
 func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
-	a.op("Fetching codespaces")
-	codespaces, err := ListCodespaces(ctx)
-	a.opdone()
+	var codespaces []Codespace
+	var err error
+	err = a.op("Fetching codespaces", func() error {
+		codespaces, err = ListCodespaces(ctx)
+		return err
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("list codespaces failed: %w", err)
 	}
 	var codespacesByName []string
 	codespacesIndex := make(map[string]Codespace)
 	for _, codespace := range codespaces {
-		name := fmt.Sprintf("%s: %s", codespace.Repository.FullName, codespace.DisplayName)
+		name := fmt.Sprintf("%s: %s", codespace.Repository, codespace.DisplayName)
 		codespacesByName = append(codespacesByName, name)
 		codespacesIndex[name] = codespace
 	}
@@ -223,22 +283,25 @@ func (a *App) pickCodespace(ctx context.Context) (string, string, error) {
 	return codespace.Name, codespace.Workspace(), nil
 }
 
-func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) (string, error) {
+func (a *App) waitForSSHServer(ctx context.Context, errch chan error, s *sshServer) (sshServerConn, error) {
 	select {
 	case err := <-errch:
-		return "", err
+		return sshServerConn{}, err
 	case <-ctx.Done():
-		return "", ctx.Err()
-	case username := <-s.Ready():
-		return username, nil
+		return sshServerConn{}, ctx.Err()
+	case conn := <-s.Ready():
+		return conn, nil
 	}
 }
 
-func (a *App) op(msg string) {
-	a.spinner.Suffix = fmt.Sprintf(" %s", msg)
-	a.spinner.Start()
-}
+func (a *App) op(msg string, fn func() error) error {
+	a.outputmu.Lock()
+	defer a.outputmu.Unlock()
 
-func (a *App) opdone() {
-	a.spinner.Stop()
+	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond)
+	s.Suffix = fmt.Sprintf(" %s", msg)
+	s.Start()
+	defer s.Stop()
+
+	return fn()
 }

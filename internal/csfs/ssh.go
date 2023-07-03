@@ -5,21 +5,25 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 )
 
+type sshServerConn struct {
+	Username []byte
+	Port     int64
+}
+
 type sshServer struct {
-	port      int
 	codespace string
 
 	ghProcess *exec.Cmd
-	ready     chan string
+	ready     chan sshServerConn
 }
 
-func newSSHServer(port int, codespace string) *sshServer {
+func newSSHServer(codespace string) *sshServer {
 	return &sshServer{
-		port:      port,
 		codespace: codespace,
-		ready:     make(chan string),
+		ready:     make(chan sshServerConn),
 	}
 }
 
@@ -31,49 +35,68 @@ func (s *sshServer) Close() error {
 }
 
 func (s *sshServer) Listen(ctx context.Context) error {
-	w := newWriter(s.ready)
+	errch := make(chan error, 2) // writer + process
+	w := newWriter(errch, s.ready)
 	args := []string{
 		"cs",
 		"ssh",
 		"-c",
 		s.codespace,
-		fmt.Sprintf("--server-port=%d", s.port),
+		"--server-port=0",
 		"--",
 		"-tt",
 	}
-
 	s.ghProcess = exec.CommandContext(ctx, "gh", args...)
 	s.ghProcess.Stderr = w
 	s.ghProcess.Stdout = w
-
-	return s.ghProcess.Run()
+	go func() {
+		errch <- s.ghProcess.Run()
+	}()
+	return <-errch
 }
 
-func (s *sshServer) Ready() <-chan string {
+func (s *sshServer) Ready() <-chan sshServerConn {
 	return s.ready
 }
 
 type writer struct {
-	ready chan string
+	errch chan error
+	ready chan sshServerConn
 }
 
-func newWriter(ready chan string) *writer {
+func newWriter(errch chan error, ready chan sshServerConn) *writer {
 	return &writer{
+		errch: errch,
 		ready: ready,
 	}
 }
 
 func (w *writer) Write(p []byte) (n int, err error) {
 	if bytes.HasPrefix(p, []byte("Connection Details")) {
-		p := bytes.Split(p, []byte("@"))
-		if len(p) != 2 {
-			return 0, fmt.Errorf("invalid connection details: %s", p)
+		p := bytes.Split(p, []byte(" "))
+		// Format is: Connection Details: ssh codespace@localhost [-p 1234 ...]
+		// There should be at least 6 parts
+		if len(p) < 6 {
+			w.errch <- fmt.Errorf("invalid connection details: %s", p)
+			return len(p), nil
 		}
-		p2 := bytes.Split(p[0], []byte(" "))
-		if len(p2) != 4 {
-			return 0, fmt.Errorf("invalid connection details for username: %s", p)
+		// The username is in the 4th part
+		uhost := bytes.Split(p[3], []byte("@"))
+		if len(uhost) != 2 {
+			w.errch <- fmt.Errorf("invalid connection details for username: %s", p)
+			return len(p), nil
 		}
-		w.ready <- string(p2[len(p2)-1])
+		username := uhost[0]
+		// The port is in the 6th part
+		port, err := strconv.ParseInt(string(p[5]), 10, 0)
+		if err != nil {
+			w.errch <- fmt.Errorf("invalid connection details for port: %s", p)
+			return len(p), nil
+		}
+		w.ready <- sshServerConn{
+			Username: username,
+			Port:     port,
+		}
 		close(w.ready)
 	}
 	return len(p), nil

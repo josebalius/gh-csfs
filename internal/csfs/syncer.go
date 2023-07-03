@@ -15,6 +15,8 @@ func (s syncType) String() string {
 		return "codespace"
 	case syncTypeLocal:
 		return "local"
+	case syncTypeLocalWithDeletion:
+		return "local w/ deletion"
 	default:
 		return "unknown"
 	}
@@ -23,31 +25,34 @@ func (s syncType) String() string {
 const (
 	syncTypeCodespace syncType = iota
 	syncTypeLocal
+	syncTypeLocalWithDeletion
 )
 
 type syncer struct {
-	port         int
+	port         int64
 	localDir     string
 	codespaceDir string
 	excludes     []string
+	debounce     time.Duration
 
 	syncToCodespace chan struct{}
-	syncNotify      chan syncType
+	syncEvent       chan syncType
 }
 
-func newSyncer(port int, localDir, codespaceDir string, excludes []string) *syncer {
+func newSyncer(port int64, localDir, codespaceDir string, excludes []string, debounce time.Duration) *syncer {
 	return &syncer{
 		port:            port,
 		localDir:        localDir,
 		codespaceDir:    codespaceDir,
 		excludes:        excludes,
+		debounce:        debounce,
 		syncToCodespace: make(chan struct{}),
-		syncNotify:      make(chan syncType),
+		syncEvent:       make(chan syncType),
 	}
 }
 
-func (s *syncer) SyncNotify() <-chan syncType {
-	return s.syncNotify
+func (s *syncer) Event() <-chan syncType {
+	return s.syncEvent
 }
 
 func (s *syncer) SyncToLocal(ctx context.Context, deleteFiles bool) error {
@@ -62,7 +67,7 @@ func (s *syncer) SyncToCodespace(ctx context.Context) {
 }
 
 func (s *syncer) Sync(ctx context.Context) error {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(s.debounce)
 	for {
 		select {
 		case <-ctx.Done():
@@ -97,16 +102,17 @@ func (s *syncer) sync(ctx context.Context, src, dest string, excludePaths []stri
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-
-	t := syncTypeLocal
-	if src == s.localDir {
-		t = syncTypeCodespace
+	t := syncTypeCodespace
+	if dest == s.localDir {
+		t = syncTypeLocal
+		if deleteFiles {
+			t = syncTypeLocalWithDeletion
+		}
 	}
 	select {
-	case s.syncNotify <- t:
+	case s.syncEvent <- t:
 	default:
 	}
-
 	return nil
 }
 
