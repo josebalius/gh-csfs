@@ -9,6 +9,7 @@ require (
 	github.com/eiannone/keyboard v0.0.0-20220611211555-0d226195f203
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/spf13/cobra v1.7.0
+	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
 )
 
 require (

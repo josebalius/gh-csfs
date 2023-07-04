@@ -106,9 +106,8 @@ func (a *App) Run(
 	}
 
 	// Setup sync operations.
-	var workspaceExists bool
 	err = a.op("Setting up sync opertions", func() error {
-		a.syncer, workspaceExists, err = a.setupSyncer(conn, opts.Workspace, opts.Exclude)
+		a.syncer, err = a.setupSyncer(conn, opts.Workspace, opts.Exclude)
 		return err
 	})
 	if err != nil {
@@ -122,7 +121,7 @@ func (a *App) Run(
 
 	// Sync the workspace dir to the current directory. This sync omits
 	// the .git directory.
-	if err := a.initialSync(ctx, workspaceExists, opts.DeleteFiles); err != nil {
+	if err := a.initialSync(ctx, server, opts.DeleteFiles); err != nil {
 		return fmt.Errorf("initial sync failed: %w", err)
 	}
 
@@ -170,40 +169,26 @@ func (a *App) Run(
 	}
 }
 
-func (a *App) initialSync(ctx context.Context, workspaceExists, deleteFiles bool) error {
-	op := "Syncing codespace to local"
-	if !workspaceExists {
-		op = "Cloning codespace to local"
-	}
-	return a.op(op, func() error {
-		if !workspaceExists {
-			return a.syncer.InitialSync(ctx)
-		}
+func (a *App) initialSync(
+	ctx context.Context, server *sshServer, deleteFiles bool) error {
+	return a.op("Syncing codespace to local", func() error {
 		return a.syncer.SyncToLocal(ctx, deleteFiles)
 	})
 }
 
-func (a *App) setupSyncer(conn sshServerConn, workspace string, exclude []string) (*syncer, bool, error) {
+func (a *App) setupSyncer(conn sshServerConn, workspace string, exclude []string) (*syncer, error) {
 	codespaceDir := fmt.Sprintf("%s@localhost:/workspaces/%s", conn.Username, workspace)
 	wd, err := os.Getwd()
 	if err != nil {
-		return nil, false, fmt.Errorf("getwd failed: %w", err)
+		return nil, fmt.Errorf("getwd failed: %w", err)
 	}
 	localDir := filepath.Join(wd, workspace)
-	workspaceExists := true
-	if _, err := os.Stat(localDir); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, false, fmt.Errorf("stat local dir failed: %w", err)
-		}
-		// Workspace does not exist locally
-		workspaceExists = false
-	}
 	excludes := []string{".git"}
 	if len(exclude) > 0 {
 		excludes = append(excludes, exclude...)
 	}
 	a.syncer = newSyncer(conn.Port, localDir, codespaceDir, excludes, 500*time.Millisecond)
-	return a.syncer, workspaceExists, nil
+	return a.syncer, nil
 }
 
 const availableCommands = `

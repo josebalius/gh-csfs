@@ -69,9 +69,7 @@ func (s *sshServer) Listen(ctx context.Context) error {
 }
 
 func (s *sshServer) ensureReady(ctx context.Context, c sshServerConn) error {
-	dialer := net.Dialer{
-		Timeout: 500 * time.Millisecond,
-	}
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
 	for {
 		select {
 		case <-ctx.Done():

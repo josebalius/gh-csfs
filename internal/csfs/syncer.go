@@ -2,7 +2,6 @@ package csfs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -54,10 +53,6 @@ func newSyncer(port int64, localDir, codespaceDir string, excludes []string, deb
 
 func (s *syncer) Event() <-chan syncType {
 	return s.syncEvent
-}
-
-func (s *syncer) InitialSync(ctx context.Context) error {
-	return errors.New("not implemented")
 }
 
 func (s *syncer) SyncToLocal(ctx context.Context, deleteFiles bool) error {
